@@ -42,6 +42,7 @@ from langchain.schema.runnable.config import (
     ensure_config,
     get_async_callback_manager_for_config,
     get_callback_manager_for_config,
+    get_config_list,
     get_executor_for_config,
     patch_config,
 )
@@ -110,7 +111,7 @@ class Runnable(Generic[Input, Output], ABC):
         Default implementation of batch, which calls invoke N times.
         Subclasses should override this method if they can batch more efficiently.
         """
-        configs = self._get_config_list(config, len(inputs))
+        configs = get_config_list(config, len(inputs))
 
         # If there's only one input, don't bother with the executor
         if len(inputs) == 1:
@@ -135,7 +136,7 @@ class Runnable(Generic[Input, Output], ABC):
         Default implementation of abatch, which calls ainvoke N times.
         Subclasses should override this method if they can batch more efficiently.
         """
-        configs = self._get_config_list(config, len(inputs))
+        configs = get_config_list(config, len(inputs))
         coros = map(partial(self.ainvoke, **kwargs), inputs, configs)
 
         return await gather_with_concurrency(configs[0].get("max_concurrency"), *coros)
@@ -252,27 +253,6 @@ class Runnable(Generic[Input, Output], ABC):
 
     """ --- Helper methods for Subclasses --- """
 
-    def _get_config_list(
-        self, config: Optional[Union[RunnableConfig, List[RunnableConfig]]], length: int
-    ) -> List[RunnableConfig]:
-        """
-        Helper method to get a list of configs from a single config or a list of
-        configs, useful for subclasses overriding batch() or abatch().
-        """
-        if length < 1:
-            raise ValueError(f"length must be >= 1, but got {length}")
-        if isinstance(config, list) and len(config) != length:
-            raise ValueError(
-                f"config must be a list of the same length as inputs, "
-                f"but got {len(config)} configs for {length} inputs"
-            )
-
-        return (
-            list(map(ensure_config, config))
-            if isinstance(config, list)
-            else [patch_config(config, deep_copy_locals=True) for _ in range(length)]
-        )
-
     def _call_with_config(
         self,
         func: Union[
@@ -292,6 +272,8 @@ class Runnable(Generic[Input, Output], ABC):
             dumpd(self),
             input,
             run_type=run_type,
+            run_id=config.get("run_id"),
+            name=config.get("run_name"),
         )
         try:
             if accepts_run_manager_and_config(func):
@@ -333,6 +315,8 @@ class Runnable(Generic[Input, Output], ABC):
             dumpd(self),
             input,
             run_type=run_type,
+            run_id=config.get("run_id"),
+            name=config.get("run_name"),
         )
         try:
             if accepts_run_manager_and_config(func):
@@ -390,6 +374,8 @@ class Runnable(Generic[Input, Output], ABC):
             dumpd(self),
             {"input": ""},
             run_type=run_type,
+            run_id=config.get("run_id"),
+            name=config.get("run_name"),
         )
         try:
             if accepts_run_manager_and_config(transformer):
@@ -470,6 +456,8 @@ class Runnable(Generic[Input, Output], ABC):
             dumpd(self),
             {"input": ""},
             run_type=run_type,
+            run_id=config.get("run_id"),
+            name=config.get("run_name"),
         )
         try:
             # mypy can't quite work out thew type guard here, but this is safe,
@@ -545,7 +533,9 @@ class RunnableWithFallbacks(Serializable, Runnable[Input, Output]):
         config = ensure_config(config)
         callback_manager = get_callback_manager_for_config(config)
         # start the root run
-        run_manager = callback_manager.on_chain_start(dumpd(self), input)
+        run_manager = callback_manager.on_chain_start(
+            dumpd(self), input, run_id=config.get("run_id"), name=config.get("run_name")
+        )
         first_error = None
         for runnable in self.runnables:
             try:
@@ -577,7 +567,9 @@ class RunnableWithFallbacks(Serializable, Runnable[Input, Output]):
         config = ensure_config(config)
         callback_manager = get_async_callback_manager_for_config(config)
         # start the root run
-        run_manager = await callback_manager.on_chain_start(dumpd(self), input)
+        run_manager = await callback_manager.on_chain_start(
+            dumpd(self), input, run_id=config.get("run_id"), name=config.get("run_name")
+        )
 
         first_error = None
         for runnable in self.runnables:
@@ -609,7 +601,7 @@ class RunnableWithFallbacks(Serializable, Runnable[Input, Output]):
         from langchain.callbacks.manager import CallbackManager
 
         # setup callbacks
-        configs = self._get_config_list(config, len(inputs))
+        configs = get_config_list(config, len(inputs))
         callback_managers = [
             CallbackManager.configure(
                 inheritable_callbacks=config.get("callbacks"),
@@ -625,9 +617,12 @@ class RunnableWithFallbacks(Serializable, Runnable[Input, Output]):
         # start the root runs, one per input
         run_managers = [
             cm.on_chain_start(
-                dumpd(self), input if isinstance(input, dict) else {"input": input}
+                dumpd(self),
+                input if isinstance(input, dict) else {"input": input},
+                run_id=config.get("run_id"),
+                name=config.get("run_name"),
             )
-            for cm, input in zip(callback_managers, inputs)
+            for cm, input, config in zip(callback_managers, inputs, configs)
         ]
 
         first_error = None
@@ -667,7 +662,7 @@ class RunnableWithFallbacks(Serializable, Runnable[Input, Output]):
         from langchain.callbacks.manager import AsyncCallbackManager
 
         # setup callbacks
-        configs = self._get_config_list(config, len(inputs))
+        configs = get_config_list(config, len(inputs))
         callback_managers = [
             AsyncCallbackManager.configure(
                 inheritable_callbacks=config.get("callbacks"),
@@ -683,8 +678,13 @@ class RunnableWithFallbacks(Serializable, Runnable[Input, Output]):
         # start the root runs, one per input
         run_managers: List[AsyncCallbackManagerForChainRun] = await asyncio.gather(
             *(
-                cm.on_chain_start(dumpd(self), input)
-                for cm, input in zip(callback_managers, inputs)
+                cm.on_chain_start(
+                    dumpd(self),
+                    input,
+                    run_id=config.get("run_id"),
+                    name=config.get("run_name"),
+                )
+                for cm, input, config in zip(callback_managers, inputs, configs)
             )
         )
 
@@ -789,7 +789,9 @@ class RunnableSequence(Serializable, Runnable[Input, Output]):
         config = ensure_config(config)
         callback_manager = get_callback_manager_for_config(config)
         # start the root run
-        run_manager = callback_manager.on_chain_start(dumpd(self), input)
+        run_manager = callback_manager.on_chain_start(
+            dumpd(self), input, run_id=config.get("run_id"), name=config.get("run_name")
+        )
 
         # invoke all steps in sequence
         try:
@@ -817,7 +819,9 @@ class RunnableSequence(Serializable, Runnable[Input, Output]):
         config = ensure_config(config)
         callback_manager = get_async_callback_manager_for_config(config)
         # start the root run
-        run_manager = await callback_manager.on_chain_start(dumpd(self), input)
+        run_manager = await callback_manager.on_chain_start(
+            dumpd(self), input, run_id=config.get("run_id"), name=config.get("run_name")
+        )
 
         # invoke all steps in sequence
         try:
@@ -844,7 +848,7 @@ class RunnableSequence(Serializable, Runnable[Input, Output]):
         from langchain.callbacks.manager import CallbackManager
 
         # setup callbacks
-        configs = self._get_config_list(config, len(inputs))
+        configs = get_config_list(config, len(inputs))
         callback_managers = [
             CallbackManager.configure(
                 inheritable_callbacks=config.get("callbacks"),
@@ -859,8 +863,13 @@ class RunnableSequence(Serializable, Runnable[Input, Output]):
         ]
         # start the root runs, one per input
         run_managers = [
-            cm.on_chain_start(dumpd(self), input)
-            for cm, input in zip(callback_managers, inputs)
+            cm.on_chain_start(
+                dumpd(self),
+                input,
+                run_id=config.get("run_id"),
+                name=config.get("run_name"),
+            )
+            for cm, input, config in zip(callback_managers, inputs, configs)
         ]
 
         # invoke
@@ -898,7 +907,7 @@ class RunnableSequence(Serializable, Runnable[Input, Output]):
         )
 
         # setup callbacks
-        configs = self._get_config_list(config, len(inputs))
+        configs = get_config_list(config, len(inputs))
         callback_managers = [
             AsyncCallbackManager.configure(
                 inheritable_callbacks=config.get("callbacks"),
@@ -914,8 +923,13 @@ class RunnableSequence(Serializable, Runnable[Input, Output]):
         # start the root runs, one per input
         run_managers: List[AsyncCallbackManagerForChainRun] = await asyncio.gather(
             *(
-                cm.on_chain_start(dumpd(self), input)
-                for cm, input in zip(callback_managers, inputs)
+                cm.on_chain_start(
+                    dumpd(self),
+                    input,
+                    run_id=config.get("run_id"),
+                    name=config.get("run_name"),
+                )
+                for cm, input, config in zip(callback_managers, inputs, configs)
             )
         )
 
@@ -951,7 +965,9 @@ class RunnableSequence(Serializable, Runnable[Input, Output]):
         config = ensure_config(config)
         callback_manager = get_callback_manager_for_config(config)
         # start the root run
-        run_manager = callback_manager.on_chain_start(dumpd(self), input)
+        run_manager = callback_manager.on_chain_start(
+            dumpd(self), input, run_id=config.get("run_id"), name=config.get("run_name")
+        )
 
         steps = [self.first] + self.middle + [self.last]
         streaming_start_index = 0
@@ -1018,7 +1034,9 @@ class RunnableSequence(Serializable, Runnable[Input, Output]):
         config = ensure_config(config)
         callback_manager = get_async_callback_manager_for_config(config)
         # start the root run
-        run_manager = await callback_manager.on_chain_start(dumpd(self), input)
+        run_manager = await callback_manager.on_chain_start(
+            dumpd(self), input, run_id=config.get("run_id"), name=config.get("run_name")
+        )
 
         steps = [self.first] + self.middle + [self.last]
         streaming_start_index = len(steps) - 1
@@ -1149,7 +1167,9 @@ class RunnableMap(Serializable, Runnable[Input, Dict[str, Any]]):
             local_metadata=None,
         )
         # start the root run
-        run_manager = callback_manager.on_chain_start(dumpd(self), input)
+        run_manager = callback_manager.on_chain_start(
+            dumpd(self), input, run_id=config.get("run_id"), name=config.get("run_name")
+        )
 
         # gather results from all steps
         try:
@@ -1189,7 +1209,9 @@ class RunnableMap(Serializable, Runnable[Input, Dict[str, Any]]):
         config = ensure_config(config)
         callback_manager = get_async_callback_manager_for_config(config)
         # start the root run
-        run_manager = await callback_manager.on_chain_start(dumpd(self), input)
+        run_manager = await callback_manager.on_chain_start(
+            dumpd(self), input, run_id=config.get("run_id"), name=config.get("run_name")
+        )
 
         # gather results from all steps
         try:
@@ -1541,7 +1563,9 @@ class RunnableBinding(Serializable, Runnable[Input, Output]):
         **kwargs: Optional[Any],
     ) -> Output:
         return self.bound.invoke(
-            input, {**self.config, **(config or {})}, **{**self.kwargs, **kwargs}
+            input,
+            cast(RunnableConfig, {**self.config, **(config or {})}),
+            **{**self.kwargs, **kwargs},
         )
 
     async def ainvoke(
@@ -1551,7 +1575,9 @@ class RunnableBinding(Serializable, Runnable[Input, Output]):
         **kwargs: Optional[Any],
     ) -> Output:
         return await self.bound.ainvoke(
-            input, {**self.config, **(config or {})}, **{**self.kwargs, **kwargs}
+            input,
+            cast(RunnableConfig, {**self.config, **(config or {})}),
+            **{**self.kwargs, **kwargs},
         )
 
     def batch(
@@ -1560,13 +1586,17 @@ class RunnableBinding(Serializable, Runnable[Input, Output]):
         config: Optional[Union[RunnableConfig, List[RunnableConfig]]] = None,
         **kwargs: Optional[Any],
     ) -> List[Output]:
-        configs = (
+        configs = cast(
+            List[RunnableConfig],
             [{**self.config, **(conf or {})} for conf in config]
             if isinstance(config, list)
             else [
-                patch_config({**self.config, **(config or {})}, deep_copy_locals=True)
+                patch_config(
+                    cast(RunnableConfig, {**self.config, **(config or {})}),
+                    deep_copy_locals=True,
+                )
                 for _ in range(len(inputs))
-            ]
+            ],
         )
         return self.bound.batch(inputs, configs, **{**self.kwargs, **kwargs})
 
@@ -1576,19 +1606,19 @@ class RunnableBinding(Serializable, Runnable[Input, Output]):
         config: Optional[Union[RunnableConfig, List[RunnableConfig]]] = None,
         **kwargs: Optional[Any],
     ) -> List[Output]:
-        configs = (
+        configs = cast(
+            List[RunnableConfig],
             [{**self.config, **(conf or {})} for conf in config]
             if isinstance(config, list)
             else [
-                patch_config({**self.config, **(config or {})}, deep_copy_locals=True)
+                patch_config(
+                    cast(RunnableConfig, {**self.config, **(config or {})}),
+                    deep_copy_locals=True,
+                )
                 for _ in range(len(inputs))
-            ]
+            ],
         )
-        return await self.bound.abatch(
-            inputs,
-            [{**self.config, **(conf or {})} for conf in configs],
-            **{**self.kwargs, **kwargs},
-        )
+        return await self.bound.abatch(inputs, configs, **{**self.kwargs, **kwargs})
 
     def stream(
         self,
@@ -1597,7 +1627,9 @@ class RunnableBinding(Serializable, Runnable[Input, Output]):
         **kwargs: Optional[Any],
     ) -> Iterator[Output]:
         yield from self.bound.stream(
-            input, {**self.config, **(config or {})}, **{**self.kwargs, **kwargs}
+            input,
+            cast(RunnableConfig, {**self.config, **(config or {})}),
+            **{**self.kwargs, **kwargs},
         )
 
     async def astream(
@@ -1607,7 +1639,9 @@ class RunnableBinding(Serializable, Runnable[Input, Output]):
         **kwargs: Optional[Any],
     ) -> AsyncIterator[Output]:
         async for item in self.bound.astream(
-            input, {**self.config, **(config or {})}, **{**self.kwargs, **kwargs}
+            input,
+            cast(RunnableConfig, {**self.config, **(config or {})}),
+            **{**self.kwargs, **kwargs},
         ):
             yield item
 
@@ -1618,7 +1652,9 @@ class RunnableBinding(Serializable, Runnable[Input, Output]):
         **kwargs: Any,
     ) -> Iterator[Output]:
         yield from self.bound.transform(
-            input, {**self.config, **(config or {})}, **{**self.kwargs, **kwargs}
+            input,
+            cast(RunnableConfig, {**self.config, **(config or {})}),
+            **{**self.kwargs, **kwargs},
         )
 
     async def atransform(
@@ -1628,7 +1664,9 @@ class RunnableBinding(Serializable, Runnable[Input, Output]):
         **kwargs: Any,
     ) -> AsyncIterator[Output]:
         async for item in self.bound.atransform(
-            input, {**self.config, **(config or {})}, **{**self.kwargs, **kwargs}
+            input,
+            cast(RunnableConfig, {**self.config, **(config or {})}),
+            **{**self.kwargs, **kwargs},
         ):
             yield item
 
