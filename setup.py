@@ -4,7 +4,7 @@ with open("README.md", "r", encoding="utf-8") as fh:
     long_description = fh.read()
 
 setuptools.setup(
-    name="spc-python-common",
+    name="spc-langchain",
     version="0.0.6",
     author="Arun Raja",
     author_email="arun.raja@skypointcloud.com",
